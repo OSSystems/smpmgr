@@ -3,11 +3,12 @@
 import asyncio
 import logging
 from dataclasses import dataclass, fields
-from typing import Final, Type, TypedDict, TypeVar, assert_never
+from typing import Final, List, Type, TypedDict, TypeVar, assert_never, cast
 
 import typer
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from serial import SerialException
+from smp import header as smpheader
 from smp.exceptions import SMPBadStartDelimiter
 from smpclient import SMPClient
 from smpclient.generics import SMPRequest, TEr1, TEr2, TRep
@@ -38,6 +39,7 @@ class Options:
     baudrate: int | None
     line_length: int | None
     line_buffers: int | None
+    forward_tree: List[int]
 
 
 DEFAULT_LINE_LENGTH: Final = 128
@@ -49,6 +51,13 @@ class SMPSerialTransportKwargs(TypedDict, total=False):
     line_length: int
     line_buffers: int
     baudrate: int
+
+
+def _with_forward_tree(client: TSMPClient, options: Options) -> TSMPClient:
+    """Tag the client with a ForwardTree so `smp_request` forwards every request."""
+    if options.forward_tree:
+        client.forward_tree = smpheader.ForwardTree(options.forward_tree)  # type: ignore[attr-defined] # noqa: E501
+    return client
 
 
 def get_custom_smpclient(options: Options, smp_client_cls: Type[TSMPClient]) -> TSMPClient:
@@ -95,22 +104,30 @@ def get_custom_smpclient(options: Options, smp_client_cls: Type[TSMPClient]) -> 
                 assert_never((options.line_length, options.line_buffers, options.mtu))  # type: ignore[arg-type] # noqa: E501
         if options.baudrate is not None:
             kwargs['baudrate'] = options.baudrate
-        return smp_client_cls(SMPSerialTransport(**kwargs), options.transport.port, options.timeout)
+        return _with_forward_tree(
+            smp_client_cls(SMPSerialTransport(**kwargs), options.transport.port, options.timeout),
+            options,
+        )
     elif options.transport.ble is not None:
         logger.info(f"Initializing SMPClient with the SMPBLETransport, {options.transport.ble=}")
-        return smp_client_cls(
-            SMPBLETransport(),
-            options.transport.ble,
-            options.timeout,
+        return _with_forward_tree(
+            smp_client_cls(SMPBLETransport(), options.transport.ble, options.timeout),
+            options,
         )
     elif options.transport.ip is not None:
         logger.info(f"Initializing SMPClient with the SMPUDPTransport, {options.transport.ip=}")
         if options.mtu is not None:
-            return smp_client_cls(
-                SMPUDPTransport(mtu=options.mtu), options.transport.ip, options.timeout
+            return _with_forward_tree(
+                smp_client_cls(
+                    SMPUDPTransport(mtu=options.mtu), options.transport.ip, options.timeout
+                ),
+                options,
             )
         else:
-            return smp_client_cls(SMPUDPTransport(), options.transport.ip, options.timeout)
+            return _with_forward_tree(
+                smp_client_cls(SMPUDPTransport(), options.transport.ip, options.timeout),
+                options,
+            )
     else:
         typer.echo(
             f"A transport option is required; "
@@ -160,6 +177,12 @@ async def smp_request(
     ) as progress:
         description = description or f"Waiting for response to {request.__class__.__name__}..."
         task = progress.add_task(description=description, total=None)
+        forward_tree = getattr(smpclient, "forward_tree", None)
+        if forward_tree is not None:
+            request = cast(
+                SMPRequest[TRep, TEr1, TEr2],
+                request.set_forward(forward_tree),  # type: ignore[attr-defined]
+            )
         try:
             r = await smpclient.request(request, timeout_s)
             progress.update(task, description=f"{description} OK", completed=True)
