@@ -1,0 +1,78 @@
+name: "Sync main-ossystems-next"
+
+# Daily:
+#   1. Mirror upstream (intercreate/smpmgr) main -> origin main.
+#   2. Rebuild the candidate by cherry-picking the OSSystems patches onto the
+#      freshly-synced main.
+#   3. If a patch conflicts -> park the partial rebase on a single sync-broken
+#      branch and fail; main-ossystems-next is left untouched.
+#   4. If the rebase is clean -> run the full freedom-zephyr validation suite
+#      (forward + secure samples) against the candidate, with smp/smpclient/
+#      smpmgr overridden to the OSSystems stack.
+#   5. Force-push main-ossystems-next ONLY when both the rebase is clean AND the
+#      validation passes.
+#
+# All of the above lives in scripts/sync-main-next.sh so it can be validated
+# locally (PUSH=0). This workflow only invokes that script with PUSH=1.
+#
+# NOTE: this file must live on the default branch (main-ossystems) for the
+# schedule trigger to run at all.
+
+on:
+  schedule:
+    # Daily at 04:00 UTC (01:00 BRT).
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.repository }}-sync-main-next
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # Self-hosted runner with the freedom Nix cache, Renode and the Zephyr SDK
+    # (same fleet as freedom-zephyr CI).
+    runs-on: self-hosted
+    steps:
+      - name: Checkout main-ossystems (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main-ossystems
+
+      - name: Install SSH key and known_hosts
+        # Needed by `west update` inside the validation script: freedom-zephyr's
+        # west.yml fetches from git@github.com:FreedomVeiculosEletricos.
+        run: |
+          mkdir -m 0700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H github.com > ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Sync, validate and promote
+        env:
+          # Keep the validation work tree under the workspace so the junit
+          # files below are discoverable by the publish steps.
+          WORKDIR: ${{ github.workspace }}/.validate-work
+          KEEP_WORKDIR: "1"
+        run: PUSH=1 ./scripts/sync-main-next.sh
+
+      - name: Publish freedom-zephyr Python Test Results
+        uses: EnricoMi/publish-unit-test-result-action/linux@v2
+        if: always()
+        with:
+          check_name: freedom-zephyr Python Test Results
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: "**/pytest-results.xml"
+
+      - name: Publish freedom-zephyr Twister Results
+        uses: EnricoMi/publish-unit-test-result-action/linux@v2
+        if: always()
+        with:
+          check_name: freedom-zephyr Twister Results
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: "**/twister.xml"
