@@ -26,6 +26,8 @@ on:
 
 permissions:
   contents: write
+  checks: write
+  pull-requests: write
 
 concurrency:
   group: ${{ github.repository }}-sync-main-next
@@ -33,25 +35,17 @@ concurrency:
 
 jobs:
   sync:
-    # Self-hosted runner with the freedom Nix cache, Renode and the Zephyr SDK
-    # (same fleet as freedom-zephyr CI).
     runs-on: self-hosted
     steps:
-      - name: Checkout main-ossystems (full history)
-        uses: actions/checkout@v6
+      - name: Checkout and install SSH key
+        uses: ossystems/nix-actions@v1
         with:
-          fetch-depth: 0
           ref: main-ossystems
-
-      - name: Install SSH key and known_hosts
-        # Needed by `west update` inside the validation script: freedom-zephyr's
-        # west.yml fetches from git@github.com:FreedomVeiculosEletricos.
-        run: |
-          mkdir -m 0700 ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H github.com > ~/.ssh/known_hosts 2>/dev/null
-          chmod 600 ~/.ssh/known_hosts
+          fetch-depth: 0
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          flake-check: false
+          build-hosts: false
+          build-devshells: false
 
       - name: Sync, validate and promote
         env:
